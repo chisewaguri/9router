@@ -120,6 +120,37 @@ function compressToolSchema(schema, depth) {
   return schema;
 }
 
+function normalizeAntigravityContents(contents) {
+  const normalized = [];
+
+  for (const content of contents || []) {
+    if (
+      !content?.role ||
+      !Array.isArray(content.parts) ||
+      content.parts.length === 0
+    ) {
+      continue;
+    }
+
+    const previous = normalized.at(-1);
+
+    // Removing a reasoning-only model message can leave adjacent
+    // messages with the same role. Gemini expects alternating roles,
+    // so merge their parts.
+    if (previous?.role === content.role) {
+      previous.parts.push(...content.parts);
+    } else {
+      normalized.push({
+        ...content,
+        parts: [...content.parts],
+      });
+    }
+  }
+
+  return normalized;
+}
+}
+
 // Image generation model name patterns
 const IMAGE_MODEL_PATTERNS = [
   /image/i,
@@ -256,7 +287,7 @@ export class AntigravityExecutor extends BaseExecutor {
 
     // ─── Standard (non-image) request ───
     // Fix contents for Claude models via Antigravity
-    const contents = body.request?.contents?.map(c => {
+    const rawContents = body.request?.contents?.map(c => {
       let role = c.role;
       // functionResponse must be role "user" for Claude models
       if (c.parts?.some(p => p.functionResponse)) {
@@ -284,6 +315,9 @@ export class AntigravityExecutor extends BaseExecutor {
       }
       return c;
     });
+
+    const contents =
+      normalizeAntigravityContents(rawContents);
 
     // Sanitize tool schemas and function names before sending to Antigravity.
     let tools = body.request?.tools;
