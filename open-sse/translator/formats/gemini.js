@@ -139,30 +139,40 @@ export function generateProjectId() {
 }
 
 // Helper: Remove unsupported keywords recursively from object/array
-// Also strips all vendor extension fields (x- prefixed) not supported by Gemini
-function removeUnsupportedKeywords(obj, keywords, isPropertiesMap = false) {
+// Also strips all vendor extension fields (x- prefixed) not supported by Gemini.
+// Walks only schema nodes: a JSON Schema alternates schema-node → "properties"
+// name-map → schema-node, and the name-map keys are user parameter names, not
+// schema keywords (a param literally named "title"/"format"/"properties" must
+// survive — issue #2884; also covers the Codex collaboration `encrypted: true`
+// annotation port from OmniRoute #10053).
+function removeUnsupportedKeywords(obj, keywords) {
   if (!obj || typeof obj !== "object") return;
 
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      removeUnsupportedKeywords(item, keywords, isPropertiesMap);
+      removeUnsupportedKeywords(item, keywords);
     }
     return;
   }
 
+  // Property name-map: keys are user-defined parameter names. Descend into
+  // each value (which is a schema node) but never delete the key itself.
+  if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+    for (const propValue of Object.values(obj.properties)) {
+      removeUnsupportedKeywords(propValue, keywords);
+    }
+  }
+
   for (const key of Object.keys(obj)) {
-    // Inside a `properties` map every key is a user-declared property name, not
-    // a schema keyword — never strip those (e.g. a property literally named
-    // `encrypted` must survive). We still recurse into each property's schema
-    // so unsupported annotations on the property definition itself are removed.
-    const value = obj[key];
-    if (!isPropertiesMap && (keywords.includes(key) || key.startsWith("x-"))) {
+    if (key === "properties") continue; // handled above
+    if (keywords.includes(key) || key.startsWith("x-")) {
       delete obj[key];
       continue;
     }
 
+    const value = obj[key];
     if (value && typeof value === "object") {
-      removeUnsupportedKeywords(value, keywords, !isPropertiesMap && key === "properties");
+      removeUnsupportedKeywords(value, keywords);
     }
   }
 }
@@ -310,11 +320,24 @@ function flattenTypeArrays(obj) {
   }
 }
 
-// Infer missing type=object when properties exist (Gemini requires explicit type)
+// Infer missing type=object when properties exist (Gemini requires explicit type).
+// Descends only into schema nodes — the property name-map is NOT a schema node,
+// so a parameter literally named "properties" must not get a bogus type injected
+// (issue #2884).
 function ensureObjectType(obj) {
   if (!obj || typeof obj !== "object") return;
   if (obj.properties && !obj.type) obj.type = "object";
-  for (const v of Object.values(obj)) if (v && typeof v === "object") ensureObjectType(v);
+  // Descend into the property name-map values (each is a schema node)
+  if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+    for (const propValue of Object.values(obj.properties)) {
+      ensureObjectType(propValue);
+    }
+  }
+  // Descend into other object-valued keys except the name-map itself
+  for (const [key, value] of Object.entries(obj)) {
+    if (key === "properties") continue;
+    if (value && typeof value === "object") ensureObjectType(value);
+  }
 }
 
 // Clean JSON Schema for Antigravity API compatibility - removes unsupported keywords recursively
@@ -354,8 +377,15 @@ export function cleanJSONSchemaForAntigravity(schema) {
       }
     }
 
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
+    // Descend into schema nodes only; the property name-map keys are user
+    // parameter names (issue #2884).
+    if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+      for (const propValue of Object.values(obj.properties)) {
+        cleanupRequired(propValue);
+      }
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "properties") continue;
       if (value && typeof value === "object") {
         cleanupRequired(value);
       }
@@ -393,8 +423,15 @@ export function cleanJSONSchemaForAntigravity(schema) {
       }
     }
 
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
+    // Recurse into schema nodes only (property name-map keys are user
+    // parameter names — issue #2884)
+    if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
+      for (const propValue of Object.values(obj.properties)) {
+        addPlaceholders(propValue);
+      }
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "properties") continue;
       if (value && typeof value === "object") {
         addPlaceholders(value);
       }
