@@ -148,6 +148,12 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       stripUnsupportedParams(this.provider, model, transformed);
+      // Ask OpenAI-compatible upstreams to include usage in the final stream
+      // chunk so /v1 streaming requests record real token counts instead of
+      // IN 0 · OUT 0 (issue #3017). Same approach as the iflow executor.
+      if (stream && transformed.messages && !transformed.stream_options) {
+        transformed.stream_options = { include_usage: true };
+      }
     }
 
     return injectReasoningContent({ provider: this.provider, model, body: transformed });
