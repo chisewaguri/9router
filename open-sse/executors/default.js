@@ -115,6 +115,7 @@ export class DefaultExecutor extends BaseExecutor {
     const transformed = this.applyJsonSchemaFallback(body);
 
     if (transformed && typeof transformed === "object") {
+<<<<<<< HEAD
       // The official OpenAI transport is force-streamed even for JSON clients.
       // Keep the actual upstream body aligned with the executor's resolved mode;
       // the chat core still converts the SSE response back to JSON for those clients.
@@ -137,6 +138,11 @@ export class DefaultExecutor extends BaseExecutor {
       if (this.provider === "openai") {
         normalizeOpenAIToolCallIds(transformed);
       }
+      const toolNameMaxLength = this.config.quirks?.toolNameMaxLength || 64;
+      normalizeOpenAIToolNames(transformed, toolNameMaxLength);
+      // NVIDIA-specific: normalize tool_call IDs to a compact deterministic ID that NVIDIA accepts
+      if (this.provider === "nvidia") normalizeNvidiaToolCallIds(transformed);
+
       // quirk: some openai-compatible providers reject Anthropic's client_metadata field
       if (this.config.quirks?.dropClientMetadata) {
         delete transformed.client_metadata;
