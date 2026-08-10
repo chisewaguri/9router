@@ -58,11 +58,18 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
-
 // Cap on the upstream error text persisted per account and echoed to clients.
 // The previous 100-char clip landed inside the upstream reason ("Upstream reques…"),
 // discarding the only diagnostic that mattered and leaving operators with nothing.
 export const ACCOUNT_ERROR_MESSAGE_MAX_CHARS = 2000;
+
+// Non-streaming body read timeout. FETCH_CONNECT_TIMEOUT_MS only covers headers;
+// once they arrive an upstream that stalls mid-body left the read hanging with no
+// deadline at all, so the client blocked forever on a request that would never
+// complete. Streaming already has first-chunk/stall timeouts — this is the
+// non-streaming equivalent. Generous, because a buffered completion with a large
+// max_tokens legitimately takes minutes. Env: RESPONSE_BODY_TIMEOUT_MS.
+export const RESPONSE_BODY_TIMEOUT_MS = envMs("RESPONSE_BODY_TIMEOUT_MS", 300 * 1000);
 
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
