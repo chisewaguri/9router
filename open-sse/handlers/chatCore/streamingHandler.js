@@ -120,7 +120,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
   let completed = false;
 
-  const onStreamComplete = (contentObj, usage, ttftAt) => {
+  const onStreamComplete = (contentObj, usage, ttftAt, meta) => {
     completed = true;
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
@@ -134,10 +134,16 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     // the usage view and anything reading requestDetails all agreed nothing was
     // wrong while the caller received an empty body. Recording it truthfully is
     // what makes the failure findable; pipeWithDisconnect emits the client-facing
-    // error frame (2026-08-05, expired Claude OAuth left isActive).
+    // error frame (2026-08-05, expired Claude OAuth left isActive). An exhausted
+    // empty stream from the empty-stream guard (embedded error / "error" finish)
+    // is likewise a failed attempt.
     const producedNothing = !contentObj?.content && !contentObj?.thinking &&
       !(usage?.completion_tokens > 0);
-    const detailStatus = producedNothing ? "error" : "success";
+    const isExhausted = meta?.empty && (meta?.upstreamError || meta?.finishReason === "error");
+    const status = (producedNothing || isExhausted) ? "error" : "success";
+    const reportedContent = isExhausted
+      ? `[Empty streaming response] upstream=${meta?.upstreamError?.status || meta?.finishReason || "EMPTY_RESPONSE"}`
+      : safeContent;
 
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -145,10 +151,16 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       tokens: usage || { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
-      providerResponse: safeContent,
-      response: { content: safeContent, thinking: safeThinking, type: "streaming" },
+      providerResponse: reportedContent,
+      response: {
+        content: reportedContent,
+        thinking: safeThinking,
+        type: "streaming",
+        finishReason: meta?.finishReason,
+        upstreamError: meta?.upstreamError,
+      },
       pxpipe,
-      status: detailStatus
+      status
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });

@@ -34,7 +34,10 @@ const STREAM_MODE = {
  * @param {string} options.model - Model name
  * @param {string} options.connectionId - Connection ID for usage tracking
  * @param {object} options.body - Request body (for input token estimation)
- * @param {function} options.onStreamComplete - Callback when stream completes (content, usage)
+ * @param {function} options.onStreamComplete - Callback when stream completes (content, usage, ttftAt, meta)
+ *   meta: { finishReason, upstreamError, empty } from the translator state — used by
+ *   request-detail to record a "totally exhausted empty Anthropic attempt" as an error,
+ *   not a misleading healthy completion.
  * @param {string} options.apiKey - API key for usage tracking
  */
 export function createSSEStream(options = {}) {
@@ -405,7 +408,11 @@ export function createSSEStream(options = {}) {
             onStreamComplete({
               content: accumulatedContent,
               thinking: accumulatedThinking
-            }, usage, ttftAt);
+            }, usage, ttftAt, {
+              finishReason: state?.finishReason,
+              upstreamError: state?.upstreamError,
+              empty: !accumulatedContent,
+            });
           }
           return;
         }
@@ -482,7 +489,11 @@ export function createSSEStream(options = {}) {
           onStreamComplete({
             content: accumulatedContent,
             thinking: accumulatedThinking
-          }, state?.usage, ttftAt);
+          }, state?.usage, ttftAt, {
+            finishReason: state?.finishReason,
+            upstreamError: state?.upstreamError,
+            empty: !accumulatedContent,
+          });
         }
       } catch (error) {
         console.log("Error in flush:", error);
