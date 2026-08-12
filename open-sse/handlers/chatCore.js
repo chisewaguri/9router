@@ -3,6 +3,7 @@ import { translateRequest } from "../translator/index.js";
 import { applyThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough } from "../translator/formats/claude.js";
+import { isOpencodeGoProvider, stripBooleanReasoning } from "../services/opencodeReasoningSanitizer.js";
 import { createStreamController } from "../utils/streamHandler.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { createRequestLogger } from "../utils/requestLogger.js";
@@ -183,6 +184,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     delete translatedBody._customToolNames;
     translatedBody.model = stripThinkingSuffix(upstreamModel);
     stripContinuityFields(translatedBody);
+  }
+
+  // opencode Go-backed providers (opencode, opencode-go) use a Go
+  // ChatCompletionRequest struct where `reasoning` is a structured object.
+  // A boolean `reasoning: true/false` — valid per the OpenAI API — 400s on the
+  // Go side ("cannot unmarshal bool into Go struct field"). Strip it here so
+  // the upstream applies its own default reasoning behavior. OmniRoute #7891.
+  if (isOpencodeGoProvider(provider)) {
+    translatedBody = stripBooleanReasoning(translatedBody);
   }
 
   // Dedupe duplicate built-in tools when equivalent MCP tools are present (Claude clients only).
