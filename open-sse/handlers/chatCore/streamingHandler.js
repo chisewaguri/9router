@@ -90,7 +90,12 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   // dies mid-response closes with an explicit error instead of a truncated body
   // the caller cannot distinguish from a normal finish. Null for formats whose
   // terminal marker is ambiguous, which leaves those unchanged.
-  const terminalTracker = createTerminalTracker(targetFormat);
+  // Track the CLIENT-facing format, not the upstream format: the transform
+  // stream emits sourceFormat output, so targetFormat (the provider format,
+  // e.g. openai for deepseek) would never match a responses client's terminal
+  // (response.completed) and would fire a spurious "no terminal" drop on every
+  // /v1/responses request.
+  const terminalTracker = createTerminalTracker(sourceFormat);
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs, terminalTracker);
 
   saveRequestDetail(buildRequestDetail({
