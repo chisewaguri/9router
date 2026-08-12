@@ -91,6 +91,13 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
   }
 
   const usage = responseBody.usage || {};
+  // Responses cache counters survive the forced-SSE→JSON fold: chat-format
+  // streams report cached tokens as cached_tokens / prompt_tokens_details.
+  //cached_tokens; Responses reports them under input_tokens_details.
+  //cached_tokens. Folding only input/output/total dropped them (DurinDoor a2b).
+  const cachedTokens = usage.cached_tokens
+    ?? usage.prompt_tokens_details?.cached_tokens
+    ?? usage.input_tokens_details?.cached_tokens;
   return {
     id: `resp_${responseBody.id || ""}`.replace(/^resp_chatcmpl-/, "resp_"),
     object: "response",
@@ -104,6 +111,9 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
       input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
       output_tokens: usage.completion_tokens || usage.output_tokens || 0,
       total_tokens: usage.total_tokens || (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+      ...(cachedTokens !== undefined
+        ? { input_tokens_details: { ...(usage.input_tokens_details || {}), cached_tokens: cachedTokens } }
+        : {}),
     },
   };
 }
