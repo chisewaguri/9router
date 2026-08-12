@@ -1,5 +1,14 @@
 import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
 
+// The #3064 accountFallback rework kept the getModelLockKey / buildModelLockUpdate
+// usages but dropped these constant definitions that v0.5.50 declared in this file.
+// Without them every request path that touches account locks throws a ReferenceError.
+/** Prefix for model lock flat fields on connection record */
+export const MODEL_LOCK_PREFIX = "modelLock_";
+
+/** Special key used when no model is known (account-level lock) */
+export const MODEL_LOCK_ALL = `${MODEL_LOCK_PREFIX}__all`;
+
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
  * Level 1: 1s, Level 2: 2s, Level 3: 4s... → max 4 min
