@@ -68,7 +68,13 @@ describe("antigravity computeRetryDelay hook (D3)", () => {
   });
 
   it("registry uses the daily IDE cloudcode host and user agent", () => {
-    expect(antigravity.transport.baseUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com"]);
+    // #3064 widened the fallback list to include the sandbox MITM host and the
+    // production host; #3208 moved the primary API endpoint to production.
+    expect(antigravity.transport.baseUrls).toEqual([
+      "https://daily-cloudcode-pa.sandbox.googleapis.com",
+      "https://daily-cloudcode-pa.googleapis.com",
+      "https://cloudcode-pa.googleapis.com",
+    ]);
     expect(antigravity.transport.headers["User-Agent"]).toBe("antigravity/ide/2.1.1 darwin/arm64");
   });
 
