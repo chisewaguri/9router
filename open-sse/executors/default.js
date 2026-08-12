@@ -116,7 +116,6 @@ export class DefaultExecutor extends BaseExecutor {
     const transformed = this.applyJsonSchemaFallback(body);
 
     if (transformed && typeof transformed === "object") {
-<<<<<<< HEAD
       // The official OpenAI transport is force-streamed even for JSON clients.
       // Keep the actual upstream body aligned with the executor's resolved mode;
       // the chat core still converts the SSE response back to JSON for those clients.
