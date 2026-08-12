@@ -20,6 +20,11 @@ export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
   "$schema", "$defs", "definitions", "const", "$ref", "$comment",
   // Annotation keywords (rejected by Gemini/Antigravity - e.g. MCP tool schemas set these)
   "deprecated", "readOnly", "writeOnly",
+  // Codex collaboration tools (spawn_agent / send_message / followup_task) mark
+  // their `message` parameter schema with a non-standard `encrypted: true`
+  // annotation (JsonSchema::with_encrypted). Gemini/Antigravity rejects the
+  // unknown keyword with a hard 400 ("Unknown name \"encrypted\" ...").
+  "encrypted",
   // Object validation keywords (not supported)
   "additionalProperties", "propertyNames", "patternProperties", "enumDescriptions",
   // Complex schema keywords (handled by flattenAnyOfOneOf/mergeAllOf)
@@ -135,25 +140,29 @@ export function generateProjectId() {
 
 // Helper: Remove unsupported keywords recursively from object/array
 // Also strips all vendor extension fields (x- prefixed) not supported by Gemini
-function removeUnsupportedKeywords(obj, keywords) {
+function removeUnsupportedKeywords(obj, keywords, isPropertiesMap = false) {
   if (!obj || typeof obj !== "object") return;
 
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      removeUnsupportedKeywords(item, keywords);
+      removeUnsupportedKeywords(item, keywords, isPropertiesMap);
     }
     return;
   }
 
   for (const key of Object.keys(obj)) {
-    if (keywords.includes(key) || key.startsWith("x-")) {
+    // Inside a `properties` map every key is a user-declared property name, not
+    // a schema keyword — never strip those (e.g. a property literally named
+    // `encrypted` must survive). We still recurse into each property's schema
+    // so unsupported annotations on the property definition itself are removed.
+    const value = obj[key];
+    if (!isPropertiesMap && (keywords.includes(key) || key.startsWith("x-"))) {
       delete obj[key];
       continue;
     }
 
-    const value = obj[key];
     if (value && typeof value === "object") {
-      removeUnsupportedKeywords(value, keywords);
+      removeUnsupportedKeywords(value, keywords, !isPropertiesMap && key === "properties");
     }
   }
 }
