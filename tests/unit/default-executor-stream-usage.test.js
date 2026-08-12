@@ -36,3 +36,14 @@ describe("DefaultExecutor stream_options injection (#3017)", () => {
     expect(out.stream_options).toEqual({ include_usage: false });
   });
 });
+
+  it("does not inject stream_options on Claude Messages transports (#401)", () => {
+    const claude = new DefaultExecutor("claude");
+    const body = {
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    };
+    const out = claude.transformRequest("claude-sonnet-4-6", body, true);
+    expect(out.stream_options).toBeUndefined();
+  });

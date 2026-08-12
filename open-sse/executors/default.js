@@ -162,7 +162,12 @@ export class DefaultExecutor extends BaseExecutor {
       // Ask OpenAI-compatible upstreams to include usage in the final stream
       // chunk so /v1 streaming requests record real token counts instead of
       // IN 0 · OUT 0 (issue #3017). Same approach as the iflow executor.
-      if (stream && transformed.messages && !transformed.stream_options) {
+      // Gate on the effective transport being OpenAI — Anthropic Messages
+      // rejects the OpenAI-only stream_options field with a 400
+      // ("stream_options: Extra inputs are not permitted"). DurinDoor #401.
+      const transportFormat = (credentials?.runtimeTransport?.format || this.config.format || "")
+        .replace(/-apikey$/, "");
+      if (transportFormat === "openai" && stream && transformed.messages && !transformed.stream_options) {
         transformed.stream_options = { include_usage: true };
       }
     }
