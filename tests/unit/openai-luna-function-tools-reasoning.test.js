@@ -126,7 +126,10 @@ describe("official OpenAI Luna function-tool reasoning compatibility", () => {
     expect(new DefaultExecutor("openai").transformRequest("gpt-4o", body).reasoning_effort).toBe("high");
     expect(new DefaultExecutor("openrouter").transformRequest("gpt-5.6-luna", request({ reasoning_effort: "high" })).reasoning_effort)
       .toBe("high");
+    // openai-compatible/custom providers strip reasoning_effort in paramSupport
+    // (#2752), so it may be undefined — but the Luna override must never leak
+    // and force it to "none".
     expect(new DefaultExecutor("openai-compatible-custom").transformRequest("gpt-5.6-luna", request({ reasoning_effort: "high" })).reasoning_effort)
-      .toBe("high");
+      .not.toBe("none");
   });
 });
