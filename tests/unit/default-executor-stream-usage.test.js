@@ -47,3 +47,14 @@ describe("DefaultExecutor stream_options injection (#3017)", () => {
     const out = claude.transformRequest("claude-sonnet-4-6", body, true);
     expect(out.stream_options).toBeUndefined();
   });
+
+  it("sets stream:true alongside stream_options for missing-stream bodies (#3017)", () => {
+    const body = {
+      model: "deepseek-v4-flash",
+      messages: [{ role: "user", content: "hi" }],
+      // responses→chat translation may omit stream; executor still streams upstream
+    };
+    const out = executor.transformRequest("deepseek-v4-flash", body, true);
+    expect(out.stream).toBe(true);
+    expect(out.stream_options).toEqual({ include_usage: true });
+  });

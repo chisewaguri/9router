@@ -168,6 +168,11 @@ export class DefaultExecutor extends BaseExecutor {
       const transportFormat = (credentials?.runtimeTransport?.format || this.config.format || "")
         .replace(/-apikey$/, "");
       if (transportFormat === "openai" && stream && transformed.messages && !transformed.stream_options) {
+        // stream_options is only valid on a streaming request — the responses→chat
+        // translation may not carry the `stream` field, so set it alongside or
+        // OpenAI-compatible upstreams reject with "stream_options should be set
+        // along with stream = true" (observed on deepseek).
+        transformed.stream = true;
         transformed.stream_options = { include_usage: true };
       }
     }
