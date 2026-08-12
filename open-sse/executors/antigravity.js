@@ -149,7 +149,6 @@ function normalizeAntigravityContents(contents) {
 
   return normalized;
 }
-}
 
 // Image generation model name patterns
 const IMAGE_MODEL_PATTERNS = [
