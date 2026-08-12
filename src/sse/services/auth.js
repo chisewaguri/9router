@@ -254,7 +254,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
-  const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
+  // Clipped far enough out that the upstream reason survives. At 100 chars the cut
+  // landed mid-word inside "Upstream request failed: …", so the only diagnostic
+  // that mattered was discarded before it reached either the client or the logs.
+  const reason = typeof errorText === "string"
+    ? errorText.slice(0, ACCOUNT_ERROR_MESSAGE_MAX_CHARS)
+    : "Provider error";
 
   if (isCodexPermanentOAuthFailure(status, errorText, provider)) {
     await updateProviderConnection(connectionId, {
@@ -288,12 +293,6 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
-  // Clipped far enough out that the upstream reason survives. At 100 chars the cut
-  // landed mid-word inside "Upstream request failed: …", so the only diagnostic
-  // that mattered was discarded before it reached either the client or the logs.
-  const reason = typeof errorText === "string"
-    ? errorText.slice(0, ACCOUNT_ERROR_MESSAGE_MAX_CHARS)
-    : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
   await updateProviderConnection(connectionId, {
