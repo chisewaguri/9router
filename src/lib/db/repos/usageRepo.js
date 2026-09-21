@@ -51,13 +51,53 @@ function getLocalDateKey(timestamp) {
 }
 
 function addToCounter(target, key, values) {
-  if (!target[key]) target[key] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
+  if (!target[key]) {
+    target[key] = {
+      requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0,
+      latencyMs: 0, ttftMs: 0, latencySamples: 0, ttftSamples: 0, timedCompletionTokens: 0,
+    };
+  }
   target[key].requests += values.requests || 1;
   target[key].promptTokens += values.promptTokens || 0;
   target[key].completionTokens += values.completionTokens || 0;
   target[key].cachedTokens += values.cachedTokens || 0;
   target[key].cost += values.cost || 0;
+  target[key].latencyMs += values.latencyMs || 0;
+  target[key].ttftMs += values.ttftMs || 0;
+  // A rate may only use rows that were actually timed. Rows recorded before
+  // timing existed still contribute tokens but no duration, so counting their
+  // tokens against other rows' time would invent a throughput that never
+  // happened. Carry the samples so both the live query and the daily rollup
+  // divide by the same subset they multiplied.
+  target[key].latencySamples += values.latencySamples ?? (values.latencyMs > 0 ? 1 : 0);
+  target[key].ttftSamples += values.ttftSamples ?? (values.ttftMs > 0 ? 1 : 0);
+  target[key].timedCompletionTokens += values.timedCompletionTokens
+    ?? (values.latencyMs > 0 ? values.completionTokens || 0 : 0);
   if (values.meta) Object.assign(target[key], values.meta);
+}
+
+/**
+ * Derive the operator-facing rates from summed totals. Throughput divides
+ * output tokens by time spent decoding (total minus time-to-first-token), so a
+ * slow first token does not read as slow generation. Summing before dividing
+ * weights long requests properly instead of averaging per-request rates.
+ */
+function deriveRates(agg) {
+  if (!agg) return null;
+  const latencyMs = agg.latencyMs || 0;
+  const ttftMs = agg.ttftMs || 0;
+  const decodeMs = latencyMs - ttftMs;
+  const timedCompletionTokens = agg.timedCompletionTokens || 0;
+  return {
+    avgDurationMs: agg.latencySamples > 0 ? latencyMs / agg.latencySamples : null,
+    avgTtftMs: agg.ttftSamples > 0 ? ttftMs / agg.ttftSamples : null,
+    avgTps: timedCompletionTokens > 0 && decodeMs > 0 ? timedCompletionTokens / (decodeMs / 1000) : null,
+  };
+}
+
+function withRates(entry) {
+  const rates = deriveRates(entry);
+  return rates ? { ...entry, ...rates } : entry;
 }
 
 function aggregateEntryToDay(day, entry) {
@@ -65,13 +105,20 @@ function aggregateEntryToDay(day, entry) {
   const completionTokens = entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
   const cachedTokens = entry.tokens?.cached_tokens || entry.tokens?.cache_read_input_tokens || 0;
   const cost = entry.cost || 0;
-  const vals = { promptTokens, completionTokens, cachedTokens, cost };
+  const latencyMs = entry.latencyMs || 0;
+  const ttftMs = entry.ttftMs || 0;
+  const vals = { promptTokens, completionTokens, cachedTokens, cost, latencyMs, ttftMs };
 
   day.requests = (day.requests || 0) + 1;
   day.promptTokens = (day.promptTokens || 0) + promptTokens;
   day.completionTokens = (day.completionTokens || 0) + completionTokens;
   day.cachedTokens = (day.cachedTokens || 0) + cachedTokens;
   day.cost = (day.cost || 0) + cost;
+  day.latencyMs = (day.latencyMs || 0) + latencyMs;
+  day.ttftMs = (day.ttftMs || 0) + ttftMs;
+  day.latencySamples = (day.latencySamples || 0) + (latencyMs > 0 ? 1 : 0);
+  day.ttftSamples = (day.ttftSamples || 0) + (ttftMs > 0 ? 1 : 0);
+  day.timedCompletionTokens = (day.timedCompletionTokens || 0) + (latencyMs > 0 ? completionTokens : 0);
 
   day.byProvider ||= {};
   day.byModel ||= {};
@@ -122,11 +169,12 @@ async function ensureRingInitialized() {
   recentRing.initialized = true;
   try {
     const db = await getAdapter();
-    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
+    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens, latencyMs, ttftMs FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
     recentRing.items = rows.reverse().map((r) => ({
       timestamp: r.timestamp, provider: r.provider, model: r.model, connectionId: r.connectionId,
       apiKey: r.apiKey, endpoint: r.endpoint, cost: r.cost, status: r.status,
       tokens: parseJson(r.tokens, {}),
+      latencyMs: r.latencyMs || 0, ttftMs: r.ttftMs || 0,
     }));
   } catch {}
 }
@@ -221,6 +269,8 @@ export async function getActiveRequests() {
         timestamp: e.timestamp, model: e.model, provider: e.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
+        latencyMs: e.latencyMs || 0,
+        ttftMs: e.ttftMs || 0,
         status: e.status || "ok",
       };
     })
@@ -248,6 +298,8 @@ export async function saveRequestUsage(entry) {
     const tokens = entry.tokens || {};
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
+    const latencyMs = Math.max(0, Math.round(entry.latencyMs || 0));
+    const ttftMs = Math.max(0, Math.round(entry.ttftMs || 0));
 
     let inserted = false;
 
@@ -279,12 +331,12 @@ export async function saveRequestUsage(entry) {
       }
 
       db.run(
-        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta, latencyMs, ttftMs) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
+          stringifyJson(tokens), stringifyJson({}), latencyMs, ttftMs,
         ]
       );
 
@@ -292,9 +344,10 @@ export async function saveRequestUsage(entry) {
       const row = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
       const day = row ? parseJson(row.data, {}) : {
         requests: 0, promptTokens: 0, completionTokens: 0, cost: 0,
+        latencyMs: 0, ttftMs: 0, latencySamples: 0, ttftSamples: 0, timedCompletionTokens: 0,
         byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
       };
-      aggregateEntryToDay(day, entry);
+      aggregateEntryToDay(day, { ...entry, latencyMs, ttftMs });
       db.run(`INSERT INTO usageDaily(dateKey, data) VALUES(?, ?) ON CONFLICT(dateKey) DO UPDATE SET data = excluded.data`, [dateKey, stringifyJson(day)]);
 
       // Atomic counter increment in same transaction
@@ -369,7 +422,7 @@ export async function getUsageStats(period = "all") {
   for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
-  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
+  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status, latencyMs, ttftMs FROM usageHistory ORDER BY id DESC LIMIT 100`);
   const seen = new Set();
   const recentRequests = recentRows
     .map((r) => {
@@ -379,6 +432,8 @@ export async function getUsageStats(period = "all") {
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
+        latencyMs: r.latencyMs || 0,
+        ttftMs: r.ttftMs || 0,
         status: r.status || "ok",
       };
     })
@@ -395,12 +450,26 @@ export async function getUsageStats(period = "all") {
   const stats = {
     totalRequests: 0,
     totalPromptTokens: 0, totalCompletionTokens: 0, totalCachedTokens: 0, totalCost: 0,
+    totalLatencyMs: 0, totalTtftMs: 0, totalTtftSamples: 0,
+    totalLatencySamples: 0, totalTimedCompletionTokens: 0,
     byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
     last10Minutes: [],
     pending: pendingRequests,
     activeRequests: [],
     recentRequests,
     errorProvider: (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "",
+  };
+
+  // Latency is summed by every branch below and converted to rates once, at the
+  // end, so the daily rollup and the live query cannot drift apart.
+  const addLatency = (target, source, completionTokens = 0) => {
+    const latencyMs = source.latencyMs || 0;
+    target.latencyMs = (target.latencyMs || 0) + latencyMs;
+    target.ttftMs = (target.ttftMs || 0) + (source.ttftMs || 0);
+    target.latencySamples = (target.latencySamples || 0) + (source.latencySamples ?? (latencyMs > 0 ? 1 : 0));
+    target.ttftSamples = (target.ttftSamples || 0) + (source.ttftSamples ?? (source.ttftMs > 0 ? 1 : 0));
+    target.timedCompletionTokens = (target.timedCompletionTokens || 0)
+      + (source.timedCompletionTokens ?? (latencyMs > 0 ? completionTokens : 0));
   };
 
   // Active requests
@@ -457,6 +526,11 @@ export async function getUsageStats(period = "all") {
       stats.totalCompletionTokens += day.completionTokens || 0;
       stats.totalCachedTokens += day.cachedTokens || 0;
       stats.totalCost += day.cost || 0;
+      stats.totalLatencyMs += day.latencyMs || 0;
+      stats.totalTtftMs += day.ttftMs || 0;
+      stats.totalTtftSamples += day.ttftSamples || 0;
+      stats.totalLatencySamples += day.latencySamples || 0;
+      stats.totalTimedCompletionTokens += day.timedCompletionTokens || 0;
 
       for (const [prov, p] of Object.entries(day.byProvider || {})) {
         if (!stats.byProvider[prov]) stats.byProvider[prov] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
@@ -465,6 +539,7 @@ export async function getUsageStats(period = "all") {
         stats.byProvider[prov].completionTokens += p.completionTokens || 0;
         stats.byProvider[prov].cachedTokens += p.cachedTokens || 0;
         stats.byProvider[prov].cost += p.cost || 0;
+        addLatency(stats.byProvider[prov], p, p.completionTokens || 0);
       }
 
       for (const [mk, m] of Object.entries(day.byModel || {})) {
@@ -480,6 +555,7 @@ export async function getUsageStats(period = "all") {
         stats.byModel[statsKey].completionTokens += m.completionTokens || 0;
         stats.byModel[statsKey].cachedTokens += m.cachedTokens || 0;
         stats.byModel[statsKey].cost += m.cost || 0;
+        addLatency(stats.byModel[statsKey], m, m.completionTokens || 0);
         if (dateKey > (stats.byModel[statsKey].lastUsed || "")) stats.byModel[statsKey].lastUsed = dateKey;
       }
 
@@ -497,6 +573,7 @@ export async function getUsageStats(period = "all") {
         stats.byAccount[accountKey].completionTokens += a.completionTokens || 0;
         stats.byAccount[accountKey].cachedTokens += a.cachedTokens || 0;
         stats.byAccount[accountKey].cost += a.cost || 0;
+        addLatency(stats.byAccount[accountKey], a, a.completionTokens || 0);
         if (dateKey > (stats.byAccount[accountKey].lastUsed || "")) stats.byAccount[accountKey].lastUsed = dateKey;
       }
 
@@ -517,6 +594,7 @@ export async function getUsageStats(period = "all") {
         stats.byApiKey[akKey].completionTokens += ak.completionTokens || 0;
         stats.byApiKey[akKey].cachedTokens += ak.cachedTokens || 0;
         stats.byApiKey[akKey].cost += ak.cost || 0;
+        addLatency(stats.byApiKey[akKey], ak, ak.completionTokens || 0);
         if (dateKey > (stats.byApiKey[akKey].lastUsed || "")) stats.byApiKey[akKey].lastUsed = dateKey;
       }
 
@@ -533,6 +611,7 @@ export async function getUsageStats(period = "all") {
         stats.byEndpoint[epKey].completionTokens += ep.completionTokens || 0;
         stats.byEndpoint[epKey].cachedTokens += ep.cachedTokens || 0;
         stats.byEndpoint[epKey].cost += ep.cost || 0;
+        addLatency(stats.byEndpoint[epKey], ep, ep.completionTokens || 0);
         if (dateKey > (stats.byEndpoint[epKey].lastUsed || "")) stats.byEndpoint[epKey].lastUsed = dateKey;
       }
     }
@@ -574,7 +653,7 @@ export async function getUsageStats(period = "all") {
       cutoff = new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
     }
     const filtered = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens, latencyMs, ttftMs FROM usageHistory WHERE timestamp >= ?`,
       [cutoff]
     );
 
@@ -585,11 +664,23 @@ export async function getUsageStats(period = "all") {
       const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
+      const rowLatency = {
+        latencyMs: r.latencyMs || 0,
+        ttftMs: r.ttftMs || 0,
+        latencySamples: r.latencyMs > 0 ? 1 : 0,
+        ttftSamples: r.ttftMs > 0 ? 1 : 0,
+        timedCompletionTokens: r.latencyMs > 0 ? completionTokens : 0,
+      };
 
       stats.totalPromptTokens += promptTokens;
       stats.totalCompletionTokens += completionTokens;
       stats.totalCachedTokens += cachedTokens;
       stats.totalCost += entryCost;
+      stats.totalLatencyMs += rowLatency.latencyMs;
+      stats.totalTtftMs += rowLatency.ttftMs;
+      stats.totalTtftSamples += rowLatency.ttftSamples;
+      stats.totalLatencySamples += rowLatency.latencySamples;
+      stats.totalTimedCompletionTokens += rowLatency.timedCompletionTokens;
 
       if (!stats.byProvider[r.provider]) stats.byProvider[r.provider] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
       stats.byProvider[r.provider].requests++;
@@ -597,6 +688,7 @@ export async function getUsageStats(period = "all") {
       stats.byProvider[r.provider].completionTokens += completionTokens;
       stats.byProvider[r.provider].cachedTokens += cachedTokens;
       stats.byProvider[r.provider].cost += entryCost;
+      addLatency(stats.byProvider[r.provider], rowLatency);
 
       const modelKey = r.provider ? `${r.model} (${r.provider})` : r.model;
       if (!stats.byModel[modelKey]) {
@@ -607,6 +699,7 @@ export async function getUsageStats(period = "all") {
       stats.byModel[modelKey].completionTokens += completionTokens;
       stats.byModel[modelKey].cachedTokens += cachedTokens;
       stats.byModel[modelKey].cost += entryCost;
+      addLatency(stats.byModel[modelKey], rowLatency);
       if (new Date(r.timestamp) > new Date(stats.byModel[modelKey].lastUsed)) stats.byModel[modelKey].lastUsed = r.timestamp;
 
       if (r.connectionId) {
@@ -620,6 +713,7 @@ export async function getUsageStats(period = "all") {
         stats.byAccount[accountKey].completionTokens += completionTokens;
         stats.byAccount[accountKey].cachedTokens += cachedTokens;
         stats.byAccount[accountKey].cost += entryCost;
+        addLatency(stats.byAccount[accountKey], rowLatency);
         if (new Date(r.timestamp) > new Date(stats.byAccount[accountKey].lastUsed)) stats.byAccount[accountKey].lastUsed = r.timestamp;
       }
 
@@ -633,6 +727,7 @@ export async function getUsageStats(period = "all") {
         }
         const ake = stats.byApiKey[akKey];
         ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
+        addLatency(ake, rowLatency);
         if (new Date(r.timestamp) > new Date(ake.lastUsed)) ake.lastUsed = r.timestamp;
       } else {
         if (!stats.byApiKey["local-no-key"]) {
@@ -640,6 +735,7 @@ export async function getUsageStats(period = "all") {
         }
         const ake = stats.byApiKey["local-no-key"];
         ake.requests++; ake.promptTokens += promptTokens; ake.completionTokens += completionTokens; ake.cachedTokens += cachedTokens; ake.cost += entryCost;
+        addLatency(ake, rowLatency);
         if (new Date(r.timestamp) > new Date(ake.lastUsed)) ake.lastUsed = r.timestamp;
       }
 
@@ -650,17 +746,46 @@ export async function getUsageStats(period = "all") {
       }
       const epe = stats.byEndpoint[epKey];
       epe.requests++; epe.promptTokens += promptTokens; epe.completionTokens += completionTokens; epe.cachedTokens += cachedTokens; epe.cost += entryCost;
+      addLatency(epe, rowLatency);
       if (new Date(r.timestamp) > new Date(epe.lastUsed)) epe.lastUsed = r.timestamp;
     }
   }
 
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+
+  // Convert summed latency into the rates the dashboard displays.
+  const totals = {
+    latencyMs: stats.totalLatencyMs,
+    ttftMs: stats.totalTtftMs,
+    ttftSamples: stats.totalTtftSamples,
+    latencySamples: stats.totalLatencySamples,
+    timedCompletionTokens: stats.totalTimedCompletionTokens,
+  };
+  Object.assign(stats, deriveRates(totals) || {});
+  // How many requests actually carried timing. Rates are computed from this
+  // subset, so the UI can say so instead of implying the whole period was timed.
+  stats.timedRequests = stats.totalLatencySamples;
+  for (const bucket of ["byProvider", "byModel", "byAccount", "byApiKey", "byEndpoint"]) {
+    for (const [key, entry] of Object.entries(stats[bucket])) {
+      stats[bucket][key] = withRates(entry);
+    }
+  }
   return stats;
 }
 
 export async function getChartData(period = "7d") {
   const db = await getAdapter();
   const now = Date.now();
+
+  // Tokens per second per bucket: output tokens over decode time, summed across
+  // the bucket so the bar shows real generation speed, not an average of rates.
+  // Only timed rows contribute tokens here — otherwise untimed tokens would be
+  // divided by other rows' time and inflate the rate.
+  const rateOf = (timedTokens, latencyMs, ttftMs) => {
+    const decodeMs = latencyMs - ttftMs;
+    if (timedTokens > 0 && decodeMs > 0) return timedTokens / (decodeMs / 1000);
+    return null;
+  };
 
   if (period === "today") {
     const bucketCount = 24;
@@ -670,10 +795,10 @@ export async function getChartData(period = "7d") {
     const startTime = startOfDay.getTime();
     const endTime = startTime + bucketCount * bucketMs;
     const labelFn = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-    const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0 }));
+    const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, inputTokens: 0, outputTokens: 0, requests: 0, cost: 0, latencyMs: 0, ttftMs: 0, timedTokens: 0, tps: null }));
 
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, promptTokens, completionTokens, cost, latencyMs, ttftMs FROM usageHistory WHERE timestamp >= ?`,
       [new Date(startTime).toISOString()]
     );
     for (const r of rows) {
@@ -681,10 +806,18 @@ export async function getChartData(period = "7d") {
       if (t < startTime || t >= endTime) continue;
       const idx = Math.floor((t - startTime) / bucketMs);
       if (idx >= 0 && idx < bucketCount) {
-        buckets[idx].tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
-        buckets[idx].cost += r.cost || 0;
+        const b = buckets[idx];
+        b.inputTokens += r.promptTokens || 0;
+        b.outputTokens += r.completionTokens || 0;
+        b.tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
+        b.cost += r.cost || 0;
+        b.requests += 1;
+        b.latencyMs += r.latencyMs || 0;
+        b.ttftMs += r.ttftMs || 0;
+        if (r.latencyMs > 0) b.timedTokens += r.completionTokens || 0;
       }
     }
+    for (const b of buckets) b.tps = rateOf(b.timedTokens, b.latencyMs, b.ttftMs);
     return buckets;
   }
 
@@ -693,19 +826,27 @@ export async function getChartData(period = "7d") {
     const bucketMs = 3600000;
     const labelFn = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
     const startTime = now - bucketCount * bucketMs;
-    const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, cost: 0 }));
+    const buckets = Array.from({ length: bucketCount }, (_, i) => ({ label: labelFn(startTime + i * bucketMs), tokens: 0, inputTokens: 0, outputTokens: 0, requests: 0, cost: 0, latencyMs: 0, ttftMs: 0, timedTokens: 0, tps: null }));
 
     const rows = db.all(
-      `SELECT timestamp, promptTokens, completionTokens, cost FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, promptTokens, completionTokens, cost, latencyMs, ttftMs FROM usageHistory WHERE timestamp >= ?`,
       [new Date(startTime).toISOString()]
     );
     for (const r of rows) {
       const t = new Date(r.timestamp).getTime();
       if (t < startTime || t > now) continue;
       const idx = Math.min(Math.floor((t - startTime) / bucketMs), bucketCount - 1);
-      buckets[idx].tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
-      buckets[idx].cost += r.cost || 0;
+      const b = buckets[idx];
+      b.inputTokens += r.promptTokens || 0;
+      b.outputTokens += r.completionTokens || 0;
+      b.tokens += (r.promptTokens || 0) + (r.completionTokens || 0);
+      b.cost += r.cost || 0;
+      b.requests += 1;
+      b.latencyMs += r.latencyMs || 0;
+      b.ttftMs += r.ttftMs || 0;
+      if (r.latencyMs > 0) b.timedTokens += r.completionTokens || 0;
     }
+    for (const b of buckets) b.tps = rateOf(b.timedTokens, b.latencyMs, b.ttftMs);
     return buckets;
   }
 
@@ -726,7 +867,11 @@ export async function getChartData(period = "7d") {
     return {
       label: labelFn(d),
       tokens: dayData ? (dayData.promptTokens || 0) + (dayData.completionTokens || 0) : 0,
+      inputTokens: dayData ? (dayData.promptTokens || 0) : 0,
+      outputTokens: dayData ? (dayData.completionTokens || 0) : 0,
+      requests: dayData ? (dayData.requests || 0) : 0,
       cost: dayData ? (dayData.cost || 0) : 0,
+      tps: dayData ? rateOf(dayData.timedCompletionTokens || 0, dayData.latencyMs || 0, dayData.ttftMs || 0) : null,
     };
   });
 }
