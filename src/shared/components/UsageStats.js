@@ -45,16 +45,16 @@ function RecentRequests({ requests = [] }) {
           No requests recorded yet. Send one through the router to see it here.
         </div>
       ) : (
-        <div className="max-h-[420px] flex-1 overflow-y-auto">
-          <table className="w-full min-w-[420px] border-collapse text-xs">
+        <div className="max-h-[420px] flex-1 overflow-auto">
+          <table className="w-full border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-surface">
               <tr className="border-b border-border text-[11px] uppercase tracking-wide text-text-muted">
-                <th scope="col" className="w-6 px-4 py-2" />
-                <th scope="col" className="px-2 py-2 text-left font-semibold">Model</th>
-                <th scope="col" className="px-2 py-2 text-right font-semibold">In</th>
-                <th scope="col" className="px-2 py-2 text-right font-semibold">Out</th>
-                <th scope="col" className="px-2 py-2 text-right font-semibold">Tok/s</th>
-                <th scope="col" className="px-4 py-2 text-right font-semibold">When</th>
+                <th scope="col" className="w-6 ps-3 py-2" />
+                <th scope="col" className="px-1.5 py-2 text-left font-semibold">Model</th>
+                <th scope="col" className="px-1.5 py-2 text-right font-semibold">In</th>
+                <th scope="col" className="px-1.5 py-2 text-right font-semibold">Out</th>
+                <th scope="col" className="px-1.5 py-2 text-right font-semibold">Tok/s</th>
+                <th scope="col" className="px-1.5 pe-3 py-2 text-right font-semibold">When</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
@@ -63,7 +63,7 @@ function RecentRequests({ requests = [] }) {
                 const tps = computeTps(r.completionTokens, r.latencyMs, r.ttftMs);
                 return (
                   <tr key={i} className="transition-colors hover:bg-surface-2/40">
-                    <td className="py-2 pl-4">
+                    <td className="py-2 ps-3">
                       <span
                         className={`material-symbols-outlined text-[15px] ${ok ? "text-success" : "text-error"}`}
                         title={ok ? "Succeeded" : `Failed: ${r.status}`}
@@ -72,17 +72,17 @@ function RecentRequests({ requests = [] }) {
                         {ok ? "check_circle" : "error"}
                       </span>
                     </td>
-                    <td className="max-w-[160px] truncate px-2 py-2 font-mono" title={r.model}>{r.model}</td>
-                    <td className="px-2 py-2 text-right tabular-nums text-text-muted" title={fmtInt(r.promptTokens)}>
+                    <td className="max-w-0 truncate px-1.5 py-2 font-mono" title={r.model}>{r.model}</td>
+                    <td className="px-1.5 py-2 text-right tabular-nums text-text-muted" title={fmtInt(r.promptTokens)}>
                       {fmtCompact(r.promptTokens)}
                     </td>
-                    <td className="px-2 py-2 text-right tabular-nums text-text-main" title={fmtInt(r.completionTokens)}>
+                    <td className="px-1.5 py-2 text-right tabular-nums text-text-main" title={fmtInt(r.completionTokens)}>
                       {fmtCompact(r.completionTokens)}
                     </td>
-                    <td className="px-2 py-2 text-right tabular-nums">
+                    <td className="px-1.5 py-2 text-right tabular-nums">
                       {tps ? <span className="text-text-main">{fmtTps(tps)}</span> : <span className="text-text-subtle">—</span>}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right text-text-muted">
+                    <td className="whitespace-nowrap px-1.5 pe-3 py-2 text-right text-text-muted">
                       <TimeAgo timestamp={r.timestamp} />
                     </td>
                   </tr>
