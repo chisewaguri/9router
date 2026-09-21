@@ -14,6 +14,7 @@ import {
   getConnectionLabel,
   getConnectionQuotaRemaining,
   sortVisibleConnections,
+  groupConnectionsByProvider,
   buildLoadingState,
   filterQuotaStateByConnections,
   getConnectionsEmptyMessage,
@@ -24,6 +25,7 @@ import {
   shouldResetPage,
   getPaginationPageValue,
   getProviderOptions,
+  formatResetTime,
   reconcileConnectionsPage,
   getQuotaCache,
   setQuotaCache,
@@ -722,6 +724,11 @@ export default function ProviderLimits() {
     [connections, quotaData, expiringFirst, providerFilter, quotaSortMode],
   );
 
+  const providerGroups = useMemo(
+    () => groupConnectionsByProvider(sortedConnections, quotaData),
+    [sortedConnections, quotaData],
+  );
+
   // Connection is depleted when any quota entry hit the threshold
   const isConnectionDepleted = (conn) => {
     const quotas = quotaData[conn.id]?.quotas;
@@ -1046,8 +1053,39 @@ export default function ProviderLimits() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {sortedConnections.map((conn) => {
+      {providerGroups.map((group) => (
+        <section key={group.provider} className="space-y-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border pb-2">
+            <ProviderIcon
+              src={`/providers/${group.provider}.png`}
+              alt=""
+              size={20}
+              className="size-5 shrink-0 rounded object-contain"
+              fallbackText={group.provider.slice(0, 2).toUpperCase()}
+            />
+            <h2 className="min-w-0 truncate text-sm font-semibold text-text-main">
+              {providerLabel(group.provider)}
+            </h2>
+            <span className="shrink-0 text-xs text-text-muted tabular-nums">
+              {group.total} account{group.total === 1 ? "" : "s"}
+            </span>
+            {group.inactive > 0 && (
+              <span className="shrink-0 text-xs text-text-muted">{group.inactive} off</span>
+            )}
+            {group.depleted > 0 && (
+              <span className="shrink-0 text-xs font-medium text-red-500">
+                {group.depleted} out of quota
+              </span>
+            )}
+            {group.nextReset !== null && (
+              <span className="ms-auto hidden shrink-0 text-xs text-text-muted sm:block">
+                Resets in {formatResetTime(new Date(group.nextReset).toISOString())}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {group.connections.map((conn) => {
           const quota = quotaData[conn.id];
           const isLoading = loading[conn.id];
           const error = errors[conn.id];
@@ -1083,14 +1121,10 @@ export default function ProviderLimits() {
                       />
                     </div>
                     <div className="min-w-0">
+                      {/* The group header already names the provider. */}
                       <h3 className="text-sm font-semibold text-text-primary truncate">
-                        {providerLabel(conn.provider)}
+                        {getConnectionLabel(conn) || "Unnamed account"}
                       </h3>
-                      {getConnectionLabel(conn) ? (
-                        <p className="text-xs text-text-muted truncate">
-                          {getConnectionLabel(conn)}
-                        </p>
-                      ) : null}
                       {getConnectionSecondaryLabel(conn) ? (
                         <p className="text-[11px] text-text-muted/80 truncate">
                           {getConnectionSecondaryLabel(conn)}
@@ -1319,9 +1353,11 @@ export default function ProviderLimits() {
                 )}
               </div>
             </Card>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
 
       <div className="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
           <div className="flex flex-wrap items-center justify-between gap-2">

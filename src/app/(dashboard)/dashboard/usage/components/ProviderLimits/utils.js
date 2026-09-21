@@ -158,6 +158,47 @@ export function getConnectionsPaginationSummary(pagination) {
   return `Showing ${start}-${end} of ${pagination.total}`;
 }
 
+// Group connections by provider, in arrival order, with per-group account health.
+export function groupConnectionsByProvider(connections = [], quotaData = {}) {
+  const groups = new Map();
+
+  for (const connection of connections) {
+    const provider = connection.provider || "unknown";
+    if (!groups.has(provider)) {
+      groups.set(provider, {
+        provider,
+        connections: [],
+        total: 0,
+        inactive: 0,
+        depleted: 0,
+        nextReset: null,
+      });
+    }
+
+    const group = groups.get(provider);
+    group.connections.push(connection);
+    group.total += 1;
+
+    if (connection.isActive === false) group.inactive += 1;
+
+    const quotas = quotaData[connection.id]?.quotas || [];
+    const hasDepleted = quotas.some((quota) => {
+      if (!quota.total || quota.total <= 0) return false;
+      return calculatePercentage(quota.used, quota.total) <= DEPLETED_QUOTA_THRESHOLD;
+    });
+    if (hasDepleted) group.depleted += 1;
+
+    for (const quota of quotas) {
+      if (!quota.resetAt) continue;
+      const time = new Date(quota.resetAt).getTime();
+      if (!Number.isFinite(time)) continue;
+      if (group.nextReset === null || time < group.nextReset) group.nextReset = time;
+    }
+  }
+
+  return Array.from(groups.values());
+}
+
 export function getSafePagination(pagination, fallbackPageSize) {
   return (
     pagination || {
