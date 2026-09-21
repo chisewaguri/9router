@@ -58,6 +58,27 @@ describe("parseCommandCodeError", () => {
 });
 
 describe("inspectAndWrapCommandCodeResponse", () => {
+  it.each(["ndjson", "sse"])("preserves every event across arbitrary %s chunk boundaries", async (format) => {
+    const events = [
+      { type: "start" },
+      { type: "reasoning-delta", text: "Checking" },
+      { type: "tool-call", toolCallId: "call_chunk", toolName: "Read", input: { file_path: "/tmp/test" } },
+      { type: "finish", finishReason: "tool-calls" },
+    ];
+    const raw = events.map(event => format === "sse"
+      ? `data: ${JSON.stringify(event)}\n\n`
+      : `${JSON.stringify(event)}\n`).join("");
+    for (let split = 0; split <= raw.length; split++) {
+      const response = new Response(createNdjsonStream([raw.slice(0, split), raw.slice(split)]));
+      const wrapped = await inspectAndWrapCommandCodeResponse(response, "test-model");
+      const output = await wrapped.text();
+      expect(output).toContain("Checking");
+      expect(output).toContain("call_chunk");
+      expect(output).toContain('"finish_reason":"tool_calls"');
+      expect(output.match(/data: \[DONE\]/g)).toHaveLength(1);
+    }
+  });
+
   it("converts initial upstream 200 with error event to 503 Response", async () => {
     const ndjsonBody = createNdjsonStream([
       JSON.stringify({

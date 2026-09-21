@@ -158,6 +158,7 @@ export async function inspectAndWrapCommandCodeResponse(originalResponse, model)
             bufferedLines.push(trimmed);
           }
         }
+        buffer = "";
         break;
       }
 
@@ -166,7 +167,7 @@ export async function inspectAndWrapCommandCodeResponse(originalResponse, model)
       buffer = lines.pop() || "";
 
       let stopLoop = false;
-      for (const line of lines) {
+      for (const [index, line] of lines.entries()) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         const jsonStr = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
@@ -197,6 +198,9 @@ export async function inspectAndWrapCommandCodeResponse(originalResponse, model)
           event?.type === "reasoning-delta" ||
           event?.type === "finish"
         ) {
+          // A transport chunk can contain more events after the first delta.
+          // Replay those complete lines as well as the unfinished tail.
+          buffer = lines.slice(index + 1).map(line => line + "\n").join("") + buffer;
           stopLoop = true;
           break;
         }
