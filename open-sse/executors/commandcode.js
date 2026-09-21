@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { commandCodeToOpenAIResponse } from "../translator/response/commandcode-to-openai.js";
@@ -8,8 +7,6 @@ import { SSE_DONE } from "../utils/sseConstants.js";
  * CommandCodeExecutor — talks to https://api.commandcode.ai/alpha/generate
  *
  * Auth: Bearer <user_xxx> API key (stored as the connection's apiKey).
- * Adds the per-request `x-session-id` header expected by CommandCode upstream.
- *
  * Upstream returns AI SDK v5 NDJSON (one JSON event per line, no `data:` prefix).
  * We translate each event to an OpenAI chat.completion.chunk and emit it as SSE so
  * both the streaming and non-streaming (forced SSE → JSON) downstream handlers in
@@ -29,7 +26,6 @@ export class CommandCodeExecutor extends BaseExecutor {
     const headers = {
       "Content-Type": "application/json",
       ...(this.config.headers || {}),
-      "x-session-id": randomUUID(),
     };
 
     const token = credentials?.apiKey || credentials?.accessToken;
@@ -199,10 +195,7 @@ export async function inspectAndWrapCommandCodeResponse(originalResponse, model)
         if (
           event?.type === "text-delta" ||
           event?.type === "reasoning-delta" ||
-          event?.type === "tool-input-start" ||
-          event?.type === "tool-call" ||
-          event?.type === "finish" ||
-          event?.type === "finish-step"
+          event?.type === "finish"
         ) {
           stopLoop = true;
           break;
@@ -311,9 +304,13 @@ function wrapNdjsonAsOpenAISse(streamBody, model, originalResponse = null) {
       }
     },
     flush(controller) {
+      buffer += decoder.decode();
       const trimmed = buffer.trim();
       if (trimmed) {
         emitChunks(commandCodeToOpenAIResponse(trimmed, state), controller);
+      }
+      if (!state.commandCodeFinished) {
+        throw new Error("CommandCode upstream closed before a finish event");
       }
       controller.enqueue(encoder.encode(SSE_DONE));
     },
