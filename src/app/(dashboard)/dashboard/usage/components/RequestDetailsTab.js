@@ -1,12 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import PropTypes from "prop-types";
 import Card from "@/shared/components/Card";
 import Button from "@/shared/components/Button";
 import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
+import { fmtCompact, fmtInt, fmtMs, fmtTps, fmtDateTime, computeTps } from "@/shared/utils/usageFormat";
+import { TOKEN_ROLE } from "./usagePalette";
 
 let providerNameCache = null;
 let providerNodesCache = null;
@@ -98,6 +101,63 @@ function getInputTokens(tokens) {
   const cache = getCachedTokens(tokens);
   return prompt < cache ? cache : prompt;
 }
+
+/**
+ * Input and output for one request, read the same way as the overview tables:
+ * output first, cache marked beside input. Either side may be missing on older
+ * rows, so a dash is shown rather than a misleading zero.
+ */
+function TokenPair({ tokens }) {
+  const input = getInputTokens(tokens);
+  const cached = getCachedTokens(tokens);
+  const output = tokens?.completion_tokens || tokens?.output_tokens || 0;
+  const cachedPct = input ? (cached / input) * 100 : 0;
+
+  return (
+    <div className="flex flex-col gap-0.5 tabular-nums">
+      <div className="flex items-baseline justify-end gap-1.5">
+        <span className={`text-[11px] uppercase tracking-wide ${TOKEN_ROLE.input.text}`}>in</span>
+        <span className="text-text-main" title={fmtInt(input)}>{fmtCompact(input)}</span>
+        {cached > 0 && (
+          <span className="text-[11px] text-info" title={`${fmtInt(cached)} cached (${cachedPct.toFixed(0)}% of input)`}>
+            ↻{fmtCompact(cached)}
+          </span>
+        )}
+      </div>
+      <div className="flex items-baseline justify-end gap-1.5">
+        <span className={`text-[11px] uppercase tracking-wide ${TOKEN_ROLE.output.text}`}>out</span>
+        <span className="text-text-main" title={fmtInt(output)}>{fmtCompact(output)}</span>
+      </div>
+    </div>
+  );
+}
+
+TokenPair.propTypes = { tokens: PropTypes.object };
+
+/** Duration, first-token time and generation rate for one request. */
+function SpeedCell({ latency, tokens }) {
+  const ttft = latency?.ttft || 0;
+  const total = latency?.total || 0;
+  const output = tokens?.completion_tokens || tokens?.output_tokens || 0;
+  const tps = computeTps(output, total, ttft);
+  return (
+    <div className="flex flex-col gap-0.5 text-xs tabular-nums">
+      <div className="flex items-baseline justify-end gap-1.5">
+        <span className="text-[11px] uppercase tracking-wide text-text-muted">tok/s</span>
+        {tps ? (
+          <span className="font-medium text-text-main" title={`${fmtTps(tps)} output tokens per second`}>{fmtTps(tps)}</span>
+        ) : (
+          <span className="text-text-subtle" title="Not enough timing recorded">—</span>
+        )}
+      </div>
+      <div className="text-[11px] text-text-muted">
+        {ttft > 0 ? `${fmtMs(ttft)} first, ` : ""}{fmtMs(total)}
+      </div>
+    </div>
+  );
+}
+
+SpeedCell.propTypes = { latency: PropTypes.object, tokens: PropTypes.object };
 
 export default function RequestDetailsTab() {
   const [details, setDetails] = useState([]);
@@ -255,18 +315,15 @@ export default function RequestDetailsTab() {
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Timestamp</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Model</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Provider</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Input Tokens</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Cached</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Cache Creation</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
-                <th className="text-left p-4 text-sm font-semibold text-text-main">Latency</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Tokens (in / out)</th>
+                <th className="text-right p-4 text-sm font-semibold text-text-main">Speed</th>
                 <th className="text-center p-4 text-sm font-semibold text-text-main">Action</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="6" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
@@ -275,8 +332,8 @@ export default function RequestDetailsTab() {
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
-                    No request details found
+                  <td colSpan="6" className="p-8 text-center text-text-muted">
+                    No request details in this range. Widen the filters or send a request.
                   </td>
                 </tr>
               ) : (
@@ -296,24 +353,8 @@ export default function RequestDetailsTab() {
                          {getProviderName(detail.provider, providerNameCache)}
                        </span>
                      </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getInputTokens(detail.tokens).toLocaleString()}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCachedTokens(detail.tokens) > 0 ? getCachedTokens(detail.tokens).toLocaleString() : "—"}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCacheCreationTokens(detail.tokens) > 0 ? getCacheCreationTokens(detail.tokens).toLocaleString() : "—"}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {detail.tokens?.completion_tokens?.toLocaleString() || 0}
-                    </td>
-                    <td className="p-4 text-sm text-text-muted">
-                      <div className="flex flex-col gap-0.5">
-                        <div>TTFT: <span className="font-mono">{detail.latency?.ttft || 0}ms</span></div>
-                        <div>Total: <span className="font-mono">{detail.latency?.total || 0}ms</span></div>
-                      </div>
-                    </td>
+                    <td className="p-4"><TokenPair tokens={detail.tokens} /></td>
+                    <td className="p-4"><SpeedCell latency={detail.latency} tokens={detail.tokens} /></td>
                     <td className="p-4 text-center">
                       <Button
                         variant="outline"
@@ -353,20 +394,16 @@ export default function RequestDetailsTab() {
           <div className="space-y-6">
             <div className="grid min-w-0 grid-cols-1 gap-4 text-sm sm:grid-cols-2">
               <div>
-                <span className="text-text-muted">ID:</span>{" "}
-                <span className="break-all font-mono text-text-main">{selectedDetail.id}</span>
-              </div>
-              <div>
-                <span className="text-text-muted">Timestamp:</span>{" "}
-                <span className="text-text-main">{new Date(selectedDetail.timestamp).toLocaleString()}</span>
-              </div>
-              <div>
                  <span className="text-text-muted">Provider:</span>{" "}
                  <span className="text-text-main font-medium">{getProviderName(selectedDetail.provider, providerNameCache)}</span>
                </div>
               <div>
                 <span className="text-text-muted">Model:</span>{" "}
                 <span className="text-text-main font-mono">{selectedDetail.model}</span>
+              </div>
+              <div>
+                <span className="text-text-muted">Timestamp:</span>{" "}
+                <span className="text-text-main">{fmtDateTime(selectedDetail.timestamp)}</span>
               </div>
               <div>
                 <span className="text-text-muted">Status:</span>{" "}
@@ -377,41 +414,43 @@ export default function RequestDetailsTab() {
                   {selectedDetail.status}
                 </span>
               </div>
-              <div>
-                <span className="text-text-muted">Latency:</span>{" "}
-                <span className="text-text-main font-mono">
-                  TTFT {selectedDetail.latency?.ttft || 0}ms / Total {selectedDetail.latency?.total || 0}ms
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-black/5 p-3 dark:border-white/5">
+                <span className={"block text-[11px] font-semibold uppercase tracking-wide " + TOKEN_ROLE.input.text}>Input</span>
+                <span className="text-lg font-semibold tabular-nums text-text-main">{fmtCompact(getInputTokens(selectedDetail.tokens))}</span>
+                <span className="block text-[11px] text-text-muted">
+                  {getCachedTokens(selectedDetail.tokens) > 0
+                    ? fmtInt(getCachedTokens(selectedDetail.tokens)) + " cached"
+                    : "no cache hit"}
+                  {getCacheCreationTokens(selectedDetail.tokens) > 0
+                    ? " · " + fmtInt(getCacheCreationTokens(selectedDetail.tokens)) + " written"
+                    : ""}
                 </span>
               </div>
-              <div>
-                <span className="text-text-muted">Input Tokens:</span>{" "}
-                <span className="text-text-main font-mono">
-                  {getInputTokens(selectedDetail.tokens).toLocaleString()}
-                </span>
+              <div className="rounded-lg border border-black/5 p-3 dark:border-white/5">
+                <span className={"block text-[11px] font-semibold uppercase tracking-wide " + TOKEN_ROLE.output.text}>Output</span>
+                <span className="text-lg font-semibold tabular-nums text-text-main">{fmtCompact(selectedDetail.tokens?.completion_tokens || 0)}</span>
+                <span className="block text-[11px] text-text-muted">generated</span>
               </div>
-              {getCachedTokens(selectedDetail.tokens) > 0 && (
-                <div>
-                  <span className="text-text-muted">Cached Tokens:</span>{" "}
-                  <span className="text-text-main font-mono">
-                    {getCachedTokens(selectedDetail.tokens).toLocaleString()}
-                  </span>
-                </div>
-              )}
-              {getCacheCreationTokens(selectedDetail.tokens) > 0 && (
-                <div>
-                  <span className="text-text-muted">Cache Creation:</span>{" "}
-                  <span className="text-text-main font-mono">
-                    {getCacheCreationTokens(selectedDetail.tokens).toLocaleString()}
-                  </span>
-                </div>
-              )}
-              <div>
-                <span className="text-text-muted">Output Tokens:</span>{" "}
-                <span className="text-text-main font-mono">
-                  {selectedDetail.tokens?.completion_tokens?.toLocaleString() || 0}
+              <div className="rounded-lg border border-black/5 p-3 dark:border-white/5">
+                <span className="block text-[11px] font-semibold uppercase tracking-wide text-text-muted">Throughput</span>
+                <span className="text-lg font-semibold tabular-nums text-text-main">
+                  {fmtTps(computeTps(selectedDetail.tokens?.completion_tokens, selectedDetail.latency?.total, selectedDetail.latency?.ttft))}
+                </span>
+                <span className="block text-[11px] text-text-muted">tokens per second</span>
+              </div>
+              <div className="rounded-lg border border-black/5 p-3 dark:border-white/5">
+                <span className="block text-[11px] font-semibold uppercase tracking-wide text-text-muted">Latency</span>
+                <span className="text-lg font-semibold tabular-nums text-text-main">{fmtMs(selectedDetail.latency?.total || 0)}</span>
+                <span className="block text-[11px] text-text-muted">
+                  {selectedDetail.latency?.ttft > 0 ? fmtMs(selectedDetail.latency.ttft) + " to first token" : "first token not timed"}
                 </span>
               </div>
             </div>
+
+            <p className="break-all font-mono text-[11px] text-text-subtle">Request {selectedDetail.id}</p>
 
             {selectedDetail.pxpipe && (
               <div className="rounded-lg border border-black/5 dark:border-white/5 p-4">

@@ -3,23 +3,31 @@
 import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
 import PropTypes from "prop-types";
 import Card from "@/shared/components/Card";
-import Badge from "@/shared/components/Badge";
+import { fmtCompact, fmtCost, fmtInt, fmtAgo, fmtTps } from "@/shared/utils/usageFormat";
+import { TOKEN_ROLE } from "./usagePalette";
 
-const fmt = (n) => new Intl.NumberFormat().format(n || 0);
-const fmtCost = (n) => `$${(n || 0).toFixed(2)}`;
-
-function fmtTime(iso) {
-  if (!iso) return "Never";
-  const diffMins = Math.floor((Date.now() - new Date(iso)) / 60000);
-  if (diffMins < 1) return "Just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
-  return new Date(iso).toLocaleDateString();
-}
+/**
+ * Metric columns live here, once, instead of being re-declared per grouping.
+ * Every grouping then reads the same way: how many calls, what went in, what
+ * came out, how fast, what it cost.
+ */
+const METRIC_COLUMNS = [
+  { field: "requests", label: "Requests", format: "int" },
+  { field: "promptTokens", label: "Input", format: "tokens", role: "input" },
+  { field: "completionTokens", label: "Output", format: "tokens", role: "output" },
+  { field: "tps", label: "Tok/s", format: "tps" },
+  { field: "cost", label: "Est. cost", format: "cost", role: "cost" },
+];
 
 function SortIcon({ field, currentSort, currentOrder }) {
-  if (currentSort !== field) return <span className="ml-1 opacity-20">↕</span>;
-  return <span className="ml-1">{currentOrder === "asc" ? "↑" : "↓"}</span>;
+  if (currentSort !== field) {
+    return <span className="ml-1 text-text-subtle" aria-hidden="true">↕</span>;
+  }
+  return (
+    <span className="ml-1 text-primary" aria-hidden="true">
+      {currentOrder === "asc" ? "↑" : "↓"}
+    </span>
+  );
 }
 
 SortIcon.propTypes = {
@@ -28,72 +36,93 @@ SortIcon.propTypes = {
   currentOrder: PropTypes.string.isRequired,
 };
 
-/**
- * Render 3 token or cost cells based on viewMode
- */
-function ValueCells({ item, viewMode, isSummary = false }) {
-  if (viewMode === "tokens") {
+/** Input cell carries its cache hit as a quieter second line. */
+function InputCell({ item, viewMode, isSummary }) {
+  if (isSummary && item.promptTokens === undefined) {
+    return <td className="px-4 py-2.5 text-right text-text-subtle">—</td>;
+  }
+  if (viewMode === "costs") {
     return (
-      <>
-        <td className="px-6 py-3 text-right text-text-muted">
-          {isSummary && item.promptTokens === undefined ? "—" : fmt(item.promptTokens)}
-        </td>
-        <td className="px-6 py-3 text-right text-text-muted">
-          {item.cachedTokens ? fmt(item.cachedTokens) : "—"}
-        </td>
-        <td className="px-6 py-3 text-right text-text-muted">
-          {isSummary && item.completionTokens === undefined ? "—" : fmt(item.completionTokens)}
-        </td>
-        <td className="px-6 py-3 text-right font-medium">
-          {fmt(item.totalTokens)}
-        </td>
-      </>
+      <td className="px-4 py-2.5 text-right tabular-nums text-text-muted">
+        {item.inputCost === undefined ? "—" : fmtCost(item.inputCost)}
+      </td>
+    );
+  }
+  const cached = item.cachedTokens || 0;
+  const cachedPct = item.promptTokens ? (cached / item.promptTokens) * 100 : 0;
+  return (
+    <td className="px-4 py-2.5 text-right tabular-nums">
+      <span className="text-text-main" title={fmtInt(item.promptTokens)}>{fmtCompact(item.promptTokens)}</span>
+      {cached > 0 && (
+        <span className="ml-1.5 text-[11px] text-info" title={`${fmtInt(cached)} cached (${cachedPct.toFixed(0)}%)`}>
+          ↻{fmtCompact(cached)}
+        </span>
+      )}
+    </td>
+  );
+}
+
+InputCell.propTypes = {
+  item: PropTypes.object.isRequired,
+  viewMode: PropTypes.string.isRequired,
+  isSummary: PropTypes.bool,
+};
+
+function OutputCell({ item, viewMode, isSummary }) {
+  if (isSummary && item.completionTokens === undefined) {
+    return <td className="px-4 py-2.5 text-right text-text-subtle">—</td>;
+  }
+  if (viewMode === "costs") {
+    return (
+      <td className="px-4 py-2.5 text-right tabular-nums text-text-muted">
+        {item.outputCost === undefined ? "—" : fmtCost(item.outputCost)}
+      </td>
     );
   }
   return (
+    <td className="px-4 py-2.5 text-right tabular-nums text-text-main" title={fmtInt(item.completionTokens)}>
+      {fmtCompact(item.completionTokens)}
+    </td>
+  );
+}
+
+OutputCell.propTypes = InputCell.propTypes;
+
+function MetricCells({ item, viewMode, isSummary }) {
+  return (
     <>
-      <td className="px-6 py-3 text-right text-text-muted">
-        {isSummary && item.inputCost === undefined ? "—" : fmtCost(item.inputCost)}
+      <td className="px-4 py-2.5 text-right tabular-nums text-text-muted">
+        {isSummary && item.requests === undefined ? "—" : fmtInt(item.requests)}
       </td>
-      <td className="px-6 py-3 text-right text-text-muted">
-        {item.cachedCost ? fmtCost(item.cachedCost) : "—"}
+      <InputCell item={item} viewMode={viewMode} isSummary={isSummary} />
+      <OutputCell item={item} viewMode={viewMode} isSummary={isSummary} />
+      <td className="px-4 py-2.5 text-right tabular-nums">
+        {item.tps ? (
+          <span className="text-text-main" title={`${fmtTps(item.tps)} output tokens per second`}>{fmtTps(item.tps)}</span>
+        ) : (
+          <span className="text-text-subtle" title="No timing recorded for these requests">—</span>
+        )}
       </td>
-      <td className="px-6 py-3 text-right text-text-muted">
-        {isSummary && item.outputCost === undefined ? "—" : fmtCost(item.outputCost)}
-      </td>
-      <td className="px-6 py-3 text-right font-medium text-warning">
-        {fmtCost(item.totalCost || item.cost)}
+      <td className="px-4 py-2.5 text-right tabular-nums font-medium text-warning">
+        {fmtCost(item.cost ?? item.totalCost)}
       </td>
     </>
   );
 }
 
-ValueCells.propTypes = {
+MetricCells.propTypes = {
   item: PropTypes.object.isRequired,
   viewMode: PropTypes.string.isRequired,
   isSummary: PropTypes.bool,
 };
 
 /**
- * Reusable sortable usage table with expandable group rows.
+ * Sortable usage table with expandable group rows.
  *
- * @param {object} props
- * @param {string} props.title - Table title
- * @param {Array} props.columns - Column definitions [{field, label}]
- * @param {Array} props.groupedData - Grouped data from groupDataByKey
- * @param {string} props.tableType - Table type key for sort URL params
- * @param {string} props.sortBy - Current sort field
- * @param {string} props.sortOrder - Current sort order
- * @param {function} props.onToggleSort - Sort toggle handler
- * @param {string} props.viewMode - "tokens" or "costs"
- * @param {string} props.storageKey - localStorage key for expanded state
- * @param {function} props.renderGroupLabel - Render group summary first cell content
- * @param {function} props.renderDetailCells - Render detail row custom cells (before value cells)
- * @param {function} props.renderSummaryCells - Render summary row cells after group label (placeholder cols)
- * @param {string} props.emptyMessage - Empty state message
+ * Metric columns are shared across every grouping; callers only supply the
+ * identity columns that differ (model, account, key, endpoint).
  */
 export default function UsageTable({
-  title,
   columns,
   groupedData,
   tableType,
@@ -108,7 +137,6 @@ export default function UsageTable({
 }) {
   const [expanded, setExpanded] = useState(new Set());
 
-  // Load expanded state from localStorage
   useEffect(() => {
     try {
       const saved = localStorage.getItem(storageKey);
@@ -118,7 +146,6 @@ export default function UsageTable({
     }
   }, [storageKey]);
 
-  // Save expanded state to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(storageKey, JSON.stringify([...expanded]));
@@ -130,57 +157,53 @@ export default function UsageTable({
   const toggleGroup = useCallback((groupKey) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(groupKey) ? next.delete(groupKey) : next.add(groupKey);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
       return next;
     });
   }, []);
 
-  const valueColumns = useMemo(() => {
-    if (viewMode === "tokens") {
-      return [
-        { field: "promptTokens", label: "Input Tokens" },
-        { field: "cachedTokens", label: "Cached" },
-        { field: "completionTokens", label: "Output Tokens" },
-        { field: "totalTokens", label: "Total Tokens" },
-      ];
-    }
-    return [
-      { field: "promptTokens", label: "Input Cost" },
-      { field: "cachedCost", label: "Cached Cost" },
-      { field: "completionTokens", label: "Output Cost" },
-      { field: "cost", label: "Total Cost" },
-    ];
-  }, [viewMode]);
-
-  const totalColSpan = columns.length + valueColumns.length;
+  const totalColSpan = columns.length + METRIC_COLUMNS.length;
 
   return (
     <Card className="overflow-hidden">
-      <div className="p-4 border-b border-border bg-bg-subtle/50">
-        <h3 className="font-semibold">{title}</h3>
-      </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm text-left">
-          <thead className="bg-bg-subtle/30 text-text-muted uppercase text-xs">
+        <table className="w-full min-w-[820px] text-sm">
+          <thead className="border-b border-border bg-bg-subtle/40 text-[11px] uppercase tracking-wide text-text-muted">
             <tr>
               {columns.map((col) => (
                 <th
                   key={col.field}
-                  className={`px-6 py-3 cursor-pointer hover:bg-bg-subtle/50 ${col.align === "right" ? "text-right" : ""}`}
-                  onClick={() => onToggleSort(tableType, col.field)}
+                  scope="col"
+                  aria-sort={sortBy === col.field ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+                  className="px-4 py-3 font-semibold"
                 >
-                  {col.label}{" "}
-                  <SortIcon field={col.field} currentSort={sortBy} currentOrder={sortOrder} />
+                  <button
+                    type="button"
+                    onClick={() => onToggleSort(tableType, col.field)}
+                    className="inline-flex w-full items-center gap-0.5 rounded-sm text-inherit hover:text-text-main focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/60"
+                    style={{ justifyContent: col.align === "right" ? "flex-end" : "flex-start" }}
+                  >
+                    {col.label}
+                    <SortIcon field={col.field} currentSort={sortBy} currentOrder={sortOrder} />
+                  </button>
                 </th>
               ))}
-              {valueColumns.map((col) => (
+              {METRIC_COLUMNS.map((col) => (
                 <th
                   key={col.field}
-                  className="px-6 py-3 text-right cursor-pointer hover:bg-bg-subtle/50"
-                  onClick={() => onToggleSort(tableType, col.field)}
+                  scope="col"
+                  aria-sort={sortBy === col.field ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+                  className="px-4 py-3 text-right font-semibold"
                 >
-                  {col.label}{" "}
-                  <SortIcon field={col.field} currentSort={sortBy} currentOrder={sortOrder} />
+                  <button
+                    type="button"
+                    onClick={() => onToggleSort(tableType, col.field)}
+                    className="inline-flex w-full items-center justify-end gap-0.5 rounded-sm text-inherit hover:text-text-main focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/60"
+                  >
+                    <span className={col.role ? TOKEN_ROLE[col.role].text : ""}>{col.label}</span>
+                    <SortIcon field={col.field} currentSort={sortBy} currentOrder={sortOrder} />
+                  </button>
                 </th>
               ))}
             </tr>
@@ -188,39 +211,46 @@ export default function UsageTable({
           <tbody className="divide-y divide-border">
             {groupedData.map((group) => (
               <Fragment key={group.groupKey}>
-                {/* Group summary row */}
                 <tr
-                  className="group-summary cursor-pointer hover:bg-bg-subtle/50 transition-colors"
+                  className="cursor-pointer bg-surface-2/40 transition-colors hover:bg-surface-2/70"
                   onClick={() => toggleGroup(group.groupKey)}
                 >
-                  <td className="px-6 py-3">
+                  <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
-                      <span className={`material-symbols-outlined text-[18px] text-text-muted transition-transform ${expanded.has(group.groupKey) ? "rotate-90" : ""}`}>
+                      <span
+                        className={`material-symbols-outlined text-[18px] text-text-muted transition-transform ${expanded.has(group.groupKey) ? "rotate-90" : ""}`}
+                        aria-hidden="true"
+                      >
                         chevron_right
                       </span>
-                      <span className={`font-medium transition-colors ${group.summary.pending > 0 ? "text-primary" : ""}`}>
-                        {group.groupKey}
-                      </span>
+                      <span className="font-medium text-text-main">{group.groupKey}</span>
+                      {group.items.length > 1 && (
+                        <span className="text-[11px] text-text-muted">{group.items.length} entries</span>
+                      )}
+                      {group.summary.pending > 0 && (
+                        <span className="material-symbols-outlined animate-spin text-[14px] text-primary" aria-label="request in flight">
+                          progress_activity
+                        </span>
+                      )}
                     </div>
                   </td>
                   {renderSummaryCells(group)}
-                  <ValueCells item={group.summary} viewMode={viewMode} isSummary />
+                  <MetricCells item={group.summary} viewMode={viewMode} isSummary />
                 </tr>
-                {/* Detail rows */}
-                {expanded.has(group.groupKey) && group.items.map((item) => (
-                  <tr
-                    key={`detail-${item.key}`}
-                    className="group-detail hover:bg-bg-subtle/20 transition-colors"
-                  >
-                    {renderDetailCells(item)}
-                    <ValueCells item={item} viewMode={viewMode} />
-                  </tr>
-                ))}
+
+                {expanded.has(group.groupKey) &&
+                  group.items.map((item) => (
+                    <tr key={`detail-${item.key}`} className="transition-colors hover:bg-surface-2/30">
+                      {renderDetailCells(item)}
+                      <MetricCells item={item} viewMode={viewMode} />
+                    </tr>
+                  ))}
               </Fragment>
             ))}
+
             {groupedData.length === 0 && (
               <tr>
-                <td colSpan={totalColSpan} className="px-6 py-8 text-center text-text-muted">
+                <td colSpan={totalColSpan} className="px-4 py-10 text-center text-text-muted">
                   {emptyMessage}
                 </td>
               </tr>
@@ -233,7 +263,6 @@ export default function UsageTable({
 }
 
 UsageTable.propTypes = {
-  title: PropTypes.string.isRequired,
   columns: PropTypes.arrayOf(PropTypes.shape({
     field: PropTypes.string.isRequired,
     label: PropTypes.string.isRequired,
@@ -250,6 +279,3 @@ UsageTable.propTypes = {
   renderSummaryCells: PropTypes.func.isRequired,
   emptyMessage: PropTypes.string.isRequired,
 };
-
-// Re-export utilities for use in UsageStats orchestrator
-export { fmt, fmtCost, fmtTime };
