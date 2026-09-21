@@ -11,6 +11,7 @@ import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 import { openAICompletionToClaudeMessage } from "./nonStreamingResponseConverters.js";
+import { restoreLocalShellResponse } from "../../translator/concerns/localShell.js";
 
 /**
  * Convert an OpenAI Chat Completions non-streaming response body into the
@@ -280,6 +281,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   const translatedResponse = needsTranslation(targetFormat, sourceFormat)
     ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames)
     : responseBody;
+  if (sourceFormat === FORMATS.OPENAI_RESPONSES) restoreLocalShellResponse(translatedResponse, body);
   const isClaudeMessageResponse = sourceFormat === FORMATS.CLAUDE && translatedResponse?.type === "message";
   // Responses-format translation produces a `object:"response"` body with no
   // `choices`; skip the Chat-Completions-specific post-processing below for it.
